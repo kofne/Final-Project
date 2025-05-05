@@ -1,15 +1,28 @@
-/* eslint-disable @typescript-eslint/no-unused-vars */
-/* eslint-disable @typescript-eslint/no-explicit-any */
 import { NextResponse } from 'next/server'
 import prisma from '@/lib/prisma'
-import Stripe from 'stripe'
 import { auth } from '@/auth'
-const stripe = new Stripe(process.env.STRIPE_SECRET_KEY!)
+
+const PAYPAL_CLIENT_ID = process.env.PAYPAL_CLIENT_ID!
+const PAYPAL_CLIENT_SECRET = process.env.PAYPAL_CLIENT_SECRET!
+const PAYPAL_API = 'https://api-m.sandbox.paypal.com' // Use 'https://api-m.paypal.com' for live
+
+async function getPayPalAccessToken() {
+  const auth = Buffer.from(`${PAYPAL_CLIENT_ID}:${PAYPAL_CLIENT_SECRET}`).toString('base64')
+  const res = await fetch(`${PAYPAL_API}/v1/oauth2/token`, {
+    method: 'POST',
+    headers: {
+      'Authorization': `Basic ${auth}`,
+      'Content-Type': 'application/x-www-form-urlencoded',
+    },
+    body: 'grant_type=client_credentials',
+  })
+  const data = await res.json()
+  return data.access_token
+}
 
 export async function POST(req: Request) {
   try {
     const session = await auth()
-
     if (!session?.user) {
       return new NextResponse('Unauthorized', { status: 401 })
     }
@@ -21,27 +34,16 @@ export async function POST(req: Request) {
       return new NextResponse('Bad request', { status: 400 })
     }
 
-    // Create Stripe payment intent
-    const lineItems = items.map((item: any) => ({
-      price_data: {
-        currency: 'usd',
-        product_data: {
-          name: item.name,
-          images: [item.image],
-        },
-        unit_amount: Math.round(item.price * 100),
-      },
-      quantity: item.quantity,
-    }))
-
+    // Calculate total
+    const total = items.reduce(
+      (sum: number, item: any) => sum + item.price * item.quantity,
+      0
+    )
     const order = await prisma.order.create({
       data: {
         userId: session.user.id,
         status: 'PENDING',
-        total: items.reduce(
-          (total: number, item: any) => total + item.price * item.quantity,
-          0
-        ),
+        total,
         addressId: shippingAddress.id,
         items: {
           create: items.map((item: any) => ({
@@ -53,18 +55,39 @@ export async function POST(req: Request) {
       },
     })
 
-    const paymentIntent = await stripe.paymentIntents.create({
-      amount: Math.round(
-        (order.total + order.total * 0.1 + 10) * 100 // Total + 10% tax + $10 shipping
-      ),
-      currency: 'usd',
-      metadata: {
-        orderId: order.id,
+    // Create PayPal order
+    const accessToken = await getPayPalAccessToken()
+    const paypalOrderRes = await fetch(`${PAYPAL_API}/v2/checkout/orders`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${accessToken}`,
       },
+      body: JSON.stringify({
+        intent: 'CAPTURE',
+        purchase_units: [
+          {
+            amount: {
+              currency_code: 'USD',
+              value: total.toFixed(2),
+            },
+            custom_id: order.id,
+          },
+        ],
+        application_context: {
+          return_url: 'https://yourdomain.com/success',
+          cancel_url: 'https://yourdomain.com/cancel',
+        },
+      }),
     })
+    const paypalOrder = await paypalOrderRes.json()
+
+    // Return PayPal order ID and approval link
+    const approvalUrl = paypalOrder.links?.find((l: any) => l.rel === 'approve')?.href
 
     return NextResponse.json({
-      clientSecret: paymentIntent.client_secret,
+      paypalOrderId: paypalOrder.id,
+      approvalUrl,
       orderId: order.id,
     })
   } catch (error) {
