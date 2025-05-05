@@ -1,4 +1,5 @@
-import NextAuth, { DefaultSession, NextAuthOptions } from 'next-auth'
+import NextAuth, { DefaultSession } from 'next-auth'
+import type { NextAuthConfig } from 'next-auth'
 import { PrismaClient } from '@prisma/client'
 import authConfig from './auth.config'
 import bcrypt from 'bcryptjs'
@@ -16,7 +17,7 @@ declare module 'next-auth' {
   }
 }
 
-export const authOptions: NextAuthOptions = {
+export const authOptions: NextAuthConfig = {
   basePath: '/api/auth',
   session: { strategy: 'jwt' },
   ...authConfig,
